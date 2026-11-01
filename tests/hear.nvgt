@@ -1,0 +1,78 @@
+/* hear.nvgt - does sound actually come out, and does a switch crossfade?
+ *
+ * Non-interactive and bounded: plays a theme at one intensity, switches to
+ * another, then stops and exits. No keyboard, no window, no waiting on a
+ * person. The point is that choices.nvgt tests the LOGIC and this tests that
+ * the audio path works at all -- compiling is not hearing.
+ *
+ * Usage: hear <theme folder> [low] [high] [seconds each]
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+
+void main() {
+	const string[]@ args = ARGS;
+	if (args.length() < 2) {
+		println("usage: hear <theme folder> [low] [high] [seconds each]");
+		exit(2);
+	}
+	string folder = args[1];
+	int low = args.length() > 2 ? parse_int(args[2]) : 1;
+	int high = args.length() > 3 ? parse_int(args[3]) : 12;
+	int seconds = args.length() > 4 ? parse_int(args[4]) : 4;
+
+	string[]@ found = find_files(folder + "/*.epro");
+	if (@found == null or found.length() == 0) {
+		println("no .epro in " + folder);
+		exit(1);
+	}
+	mcse_theme@ theme = mcse_load_theme_file(folder + "/" + found[0]);
+	if (theme.error != "") {
+		println("theme error: " + theme.error);
+		exit(1);
+	}
+	println("theme " + found[0] + ": " + theme.layers.length() + " layers, max intensity " + theme.max_intensity());
+
+	mcse_player@ music = mcse_player(theme, folder + "/");
+	if (!music.start(low, 500)) {
+		println("start() returned false");
+		exit(1);
+	}
+	report("after start at " + low, music, theme);
+
+	uint64 until = ticks() + seconds * 1000;
+	while (ticks() < until) { music.loop(); wait(5); }
+
+	music.set_intensity(high);
+	// beat alignment means the switch waits for an agility point, so give the
+	// loop time to reach one rather than asserting it happened instantly
+	uint64 deadline = ticks() + 6000;
+	while (ticks() < deadline and music.intensity != high) { music.loop(); wait(5); }
+	report("after asking for " + high, music, theme);
+	if (music.intensity != high) println("WARNING: the switch never took effect");
+
+	until = ticks() + seconds * 1000;
+	while (ticks() < until) { music.loop(); wait(5); }
+
+	music.stop(500);
+	uint64 fade = ticks() + 800;
+	while (ticks() < fade) { music.loop(); wait(5); }
+	println("done");
+	exit(0);
+}
+
+void report(string when, mcse_player@ music, mcse_theme@ theme) {
+	string line = when + ": intensity " + music.intensity + ", playing";
+	int live = 0;
+	for (uint i = 0; i < theme.layers.length(); i++) {
+		mcse_layer@ l = theme.layers[i];
+		if (l.kind != mcse_loop) continue;
+		if (@l.playing == null) { line += " " + l.name + "=none"; continue; }
+		if (l.playing.playing) live++;
+		line += " " + l.name + "=" + (@l.current != null ? "" + l.current.intensity : "?") +
+			(l.playing.playing ? "" : "(silent)");
+	}
+	println(line + "  [" + live + " layers sounding]");
+}
