@@ -71,8 +71,11 @@ void report(string when, mcse_player@ music, mcse_theme@ theme) {
 		if (l.kind != mcse_loop) continue;
 		if (@l.playing == null) { line += " " + l.name + "=none"; continue; }
 		if (l.playing.playing) live++;
+		// the volume is read back, not assumed: "playing" only means the
+		// sound is running, and a sound running into a zero gain is silent
+		// while reporting itself perfectly healthy
 		line += " " + l.name + "=" + (@l.current != null ? "" + l.current.intensity : "?") +
-			(l.playing.playing ? "" : "(silent)");
+			"@" + l.playing.volume + (l.playing.playing ? "" : "(stopped)");
 	}
 	println(line + "  [" + live + " layers sounding]");
 }

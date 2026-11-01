@@ -32,6 +32,20 @@
 // from.
 funcdef sound@ mcse_load_sound(sound@, string);
 
+/** Decibels to linear gain.
+ *
+ * MCSE does every volume change through `set_timed_fade_in_frames`, and that
+ * takes **linear** gain -- it hands its arguments straight to the audio engine
+ * with no conversion, where `sound.volume` converts from decibels when the
+ * engine is configured for them. Mixing the two silently produces silence: a
+ * fade ending at "0 dB" is a fade ending at linear zero. So layer volumes are
+ * written in decibels, as a composer expects, and converted here at the one
+ * point they reach the engine. */
+float mcse_gain(float db) {
+	if (db <= -100) return 0;
+	return pow(10.0, db / 20.0);
+}
+
 /** How a layer behaves. A loop plays continuously and crossfades between its
  * recordings; a stinger is fired once, over the top. */
 enum mcse_layer_kind {
@@ -198,7 +212,6 @@ class mcse_player {
 			@l.playing = open(l.current.filename);
 			if (@l.playing == null) continue;
 			l.playing.looping = true;
-			l.playing.volume = -100;
 		}
 		// one tight pass: start them, then put them all at frame 0 together
 		for (uint i = 0; i < theme.layers.length(); i++)
@@ -211,8 +224,11 @@ class mcse_player {
 		for (uint i = 0; i < theme.layers.length(); i++) {
 			mcse_layer@ l = theme.layers[i];
 			if (@l.playing == null) continue;
-			if (len == 0) l.playing.volume = l.volume + volume;
-			else l.playing.set_timed_fade_in_frames(-100, l.volume + volume, len, at);
+			float gain = mcse_gain(l.volume + volume);
+			// a zero-length fade is how an instant, unambiguously LINEAR
+			// volume is set; the `volume` property's units depend on how the
+			// engine was configured, and these fades' never do
+			l.playing.set_timed_fade_in_frames(len == 0 ? gain : 0, gain, len, at);
 		}
 		started = true;
 		return true;
@@ -291,13 +307,13 @@ class mcse_player {
 		sound@ next = open(want.filename);
 		if (@next == null) return;
 		next.looping = true;
-		next.volume = -100;
 		next.play_looped();
+		float gain = mcse_gain(l.volume + volume);
 		// where the leaving layer will be when the crossfade begins
 		next.seek_in_frames(pos + (at > now() ? at - now() : 0));
-		next.set_timed_fade_in_frames(-100, l.volume + volume, len, at);
+		next.set_timed_fade_in_frames(0, gain, len, at);
 
-		l.playing.set_timed_fade_in_frames(l.volume + volume, -100, len, at);
+		l.playing.set_timed_fade_in_frames(gain, 0, len, at);
 		l.playing.set_stop_time_with_fade_in_frames(at + len, 0);
 		@l.leaving = @l.playing;
 		@l.playing = @next;
@@ -315,7 +331,8 @@ class mcse_player {
 			if (@v == null) continue;
 			sound@ s = open(v.filename);
 			if (@s == null) continue;
-			s.volume = l.volume + volume;
+			float gain = mcse_gain(l.volume + volume);
+			s.set_timed_fade_in_frames(gain, gain, 0, now());
 			s.play();
 			stingers.insert_last(@s);
 			if (layer_id >= 0) return true;
@@ -347,7 +364,7 @@ class mcse_player {
 		for (uint i = 0; i < theme.layers.length(); i++) {
 			mcse_layer@ l = theme.layers[i];
 			if (@l.playing == null) continue;
-			l.playing.set_timed_fade_in_frames(l.playing.volume, -100, len, at);
+			l.playing.set_timed_fade_in_frames(mcse_gain(l.volume + volume), 0, len, at);
 			l.playing.set_stop_time_with_fade_in_frames(at + len, 0);
 		}
 		started = false;
@@ -355,9 +372,12 @@ class mcse_player {
 
 	void set_volume(float db) property {
 		volume = db;
+		uint64 at = now();
 		for (uint i = 0; i < theme.layers.length(); i++) {
 			mcse_layer@ l = theme.layers[i];
-			if (@l.playing != null) l.playing.volume = l.volume + volume;
+			if (@l.playing == null) continue;
+			float gain = mcse_gain(l.volume + volume);
+			l.playing.set_timed_fade_in_frames(gain, gain, 0, at);
 		}
 	}
 	float get_volume() const property { return volume; }
