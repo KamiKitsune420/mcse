@@ -1,0 +1,122 @@
+/* validate.nvgt - check a theme against what the design actually needs
+ *
+ * MCSE switches a layer from one recording to another by crossfading at the
+ * same play position, and every layer loops at the theme's declared bar
+ * count. So what a theme must satisfy is:
+ *
+ *   1. every recording loads at all
+ *   2. every loop recording is **at least** as long as the loop -- a file
+ *      shorter than `bars` bars cannot complete one
+ *   3. the loop length is a whole number of bars of the declared metre, which
+ *      it is by construction, so what is really checked is whether the audio
+ *      is long enough and how much tail each file carries past the loop
+ *
+ * **It is NOT a requirement that every file be the same length**, and
+ * assuming so was a mistake worth recording. A recording of a 32-bar loop is
+ * longer than 32 bars because it carries a release tail -- the instruments
+ * and reverb dying away past the loop point -- and each one is as long as its
+ * own tail needs. In a real theme the loop is 85.3 s and the files run 90.7
+ * to 96 s. What would be fatal is a file SHORTER than the loop, and that is
+ * what this looks for.
+ *
+ * Usage: validate <theme.epro>
+ *
+ * Exits non-zero if anything is wrong, so it can sit in a build.
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+
+string folder_of(string path) {
+	int slash = path.find_last("/");
+	int back = path.find_last("\\");
+	if (back > slash) slash = back;
+	return slash < 0 ? "" : path.slice(0, slash + 1);
+}
+
+void main() {
+	const string[]@ args = ARGS;
+	if (args.length() < 2) {
+		println("usage: validate <theme.epro>");
+		exit(2);
+	}
+	string base = folder_of(args[1]);
+	mcse_theme@ theme = mcse_load_theme_file(args[1]);
+	if (theme.error != "") {
+		println("FAIL: " + theme.error);
+		exit(1);
+	}
+	// a sound's frames are in the ENGINE's output rate, not the file's, so
+	// the loop has to be expressed in the same unit before comparing. Mixing
+	// them is an 8.8% error on this machine (48000 against 44100) -- the kind
+	// that passes and is wrong.
+	uint engine_rate = uint(sound_default_engine.sample_rate);
+	if (engine_rate == 0) engine_rate = 48000;
+	uint64 loop = theme.loop_frames_at(engine_rate);
+	println("theme: " + theme.layers.length() + " layers, " + theme.tempo +
+		" bpm, " + theme.beats_per_bar + "/" + theme.beat_unit + ", " +
+		theme.bars + " bars, " + theme.sample_rate + " Hz");
+	println("  the loop is " + theme.loop_ms() / 1000.0 + " s = " + loop +
+		" frames at the engine's " + engine_rate + " Hz");
+	if (engine_rate != uint(theme.sample_rate))
+		println("  (the theme is " + theme.sample_rate + " Hz, so the engine is " +
+			"resampling; lengths below are in engine frames)");
+
+	int missing = 0, loops_checked = 0, stingers_checked = 0;
+	uint64 shortest = 0, longest = 0;
+	string[] too_short;
+
+	for (uint i = 0; i < theme.layers.length(); i++) {
+		mcse_layer@ l = theme.layers[i];
+		for (uint v = 0; v < l.variations.length(); v++) {
+			mcse_variation@ rec = l.variations[v];
+			sound s;
+			// load, not stream: a streamed sound's length is not known yet
+			// and reports a figure that is simply wrong -- measured against a
+			// decoder, it was out by several seconds on some files
+			if (!s.load(base + rec.filename)) {
+				println("  MISSING or unreadable: " + rec.filename);
+				missing++;
+				continue;
+			}
+			uint64 frames = s.length_in_frames;
+			s.close();
+			if (l.kind != mcse_loop) { stingers_checked++; continue; }
+			loops_checked++;
+			if (shortest == 0 or frames < shortest) shortest = frames;
+			if (frames > longest) longest = frames;
+			if (frames < loop)
+				too_short.insert_last(rec.filename + " is " + frames +
+					" frames, " + (loop - frames) + " short of the loop");
+		}
+	}
+
+	println("  checked " + loops_checked + " loop recordings and " +
+		stingers_checked + " stingers");
+	if (loops_checked > 0) {
+		println("  loop recordings run " + shortest + " to " + longest + " frames (" +
+			(double(shortest) / double(engine_rate)) + " to " +
+			(double(longest) / double(engine_rate)) + " s)");
+		double tail_min = double(shortest - loop) * 1000.0 / double(engine_rate) / theme.ms_per_bar();
+		double tail_max = double(longest - loop) * 1000.0 / double(engine_rate) / theme.ms_per_bar();
+		if (shortest >= loop)
+			println("  tail past the loop point: " + tail_min + " to " + tail_max + " bars");
+	}
+
+	bool ok = true;
+	if (missing > 0) {
+		println("FAIL: " + missing + " recording(s) would not load");
+		ok = false;
+	}
+	if (too_short.length() > 0) {
+		println("FAIL: recordings shorter than the loop -- these cannot play a");
+		println("      whole bar count and will cut off early:");
+		for (uint i = 0; i < too_short.length(); i++)
+			println("        " + too_short[i]);
+		ok = false;
+	}
+	println("");
+	println(ok ? "PASS" : "FAIL");
+	exit(ok ? 0 : 1);
+}

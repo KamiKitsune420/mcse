@@ -1,0 +1,96 @@
+/* drift.nvgt - do the layers stay together across the loop point?
+ *
+ * This is the check for the worst bug MCSE has had. Every recording of a
+ * layer is longer than the loop, by its own release tail -- 2 to 4 bars in a
+ * real theme -- so a layer told to loop at the end of its FILE comes round at
+ * a different moment from every other layer, and the piece falls apart after
+ * one pass. It sounds perfect for the first minute and a half, which is
+ * exactly long enough to be declared working.
+ *
+ * So: play for longer than the loop, sample every layer's position
+ * repeatedly, and report the widest gap between them. If they loop together
+ * the gap stays near zero across the wrap; if any layer loops at its own file
+ * end instead, the gap explodes to seconds the moment the first one wraps.
+ *
+ * Usage: drift <theme folder> [seconds] [intensity]
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+
+void main() {
+	const string[]@ args = ARGS;
+	if (args.length() < 2) {
+		println("usage: drift <theme folder> [seconds] [intensity]");
+		exit(2);
+	}
+	string folder = args[1];
+	int seconds = args.length() > 2 ? parse_int(args[2]) : 95;
+	int intensity = args.length() > 3 ? parse_int(args[3]) : 8;
+
+	string[]@ found = find_files(folder + "/*.epro");
+	if (@found == null or found.length() == 0) { println("no .epro in " + folder); exit(1); }
+	mcse_theme@ theme = mcse_load_theme_file(folder + "/" + found[0]);
+	if (theme.error != "") { println("theme error: " + theme.error); exit(1); }
+
+	uint rate = uint(sound_default_engine.sample_rate);
+	if (rate == 0) rate = 48000;
+	uint64 loop = theme.loop_frames_at(rate);
+	println("loop is " + (theme.loop_ms() / 1000.0) + " s; watching for " +
+		seconds + " s, so the wrap happens about " +
+		(double(seconds) / (theme.loop_ms() / 1000.0)) + " times");
+
+	mcse_player@ music = mcse_player(theme, folder + "/");
+	if (!music.start(intensity, 500)) { println("start failed"); exit(1); }
+	for (uint i = 0; i < music.problems.length(); i++)
+		println("  problem: " + music.problems[i]);
+
+	uint64 worst_before = 0, worst_after = 0;
+	int wraps = 0;
+	uint64 last_first = 0;
+	uint64 until = ticks() + seconds * 1000;
+	while (ticks() < until) {
+		music.loop();
+		wait(50);
+		uint64 low = 0, high = 0;
+		bool found_one = false;
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (l.kind != mcse_loop or @l.playing == null or !l.playing.playing) continue;
+			uint64 p = l.playing.position_in_frames;
+			if (!found_one) { low = p; high = p; found_one = true; }
+			if (p < low) low = p;
+			if (p > high) high = p;
+		}
+		if (!found_one) continue;
+		if (low < last_first and last_first > loop / 2) {
+			wraps++;
+			println("  wrap " + wraps + " at about " +
+				(double(ticks() % 1000000) / 1000.0) + " s in");
+		}
+		last_first = low;
+		uint64 spread = high - low;
+		if (wraps == 0) { if (spread > worst_before) worst_before = spread; }
+		else if (spread > worst_after) worst_after = spread;
+	}
+	music.stop(300);
+	uint64 fade = ticks() + 500;
+	while (ticks() < fade) { music.loop(); wait(5); }
+
+	double ms_before = double(worst_before) * 1000.0 / double(rate);
+	double ms_after = double(worst_after) * 1000.0 / double(rate);
+	println("");
+	println("wraps seen: " + wraps);
+	println("widest gap between layers before any wrap:  " + worst_before +
+		" frames (" + ms_before + " ms)");
+	println("widest gap after a wrap:                   " + worst_after +
+		" frames (" + ms_after + " ms)");
+	// a layer looping at its own file end instead of the theme's bar count
+	// would be seconds adrift, not milliseconds
+	bool ok = wraps == 0 or ms_after < 250.0;
+	if (wraps == 0)
+		println("INCONCLUSIVE: no wrap happened -- run it for longer than the loop");
+	println(ok ? "PASS" : "FAIL: the layers came apart across the loop");
+	exit(ok ? 0 : 1);
+}

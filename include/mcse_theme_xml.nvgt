@@ -179,6 +179,14 @@ void mcse_apply_settings(mcse_xml@ node, mcse_layer@ layer) {
 	}
 	@e = node.first("pickup");
 	if (@e != null) layer.pickup_beats = e.attr_int("beats", layer.pickup_beats);
+	@e = node.first("reverb");
+	if (@e != null) {
+		// a theme that mentions reverb at all but gives no mix still wants
+		// some, so the default here is a mix rather than "none"
+		layer.reverb_mix = e.attr_float("mix", layer.reverb_mix < 0 ? 30 : layer.reverb_mix);
+		layer.reverb_damping = e.attr_float("damping", layer.reverb_damping);
+		layer.reverb_size = e.attr_float("size", layer.reverb_size);
+	}
 }
 
 void mcse_copy_settings(mcse_layer@ from, mcse_layer@ to) {
@@ -192,6 +200,9 @@ void mcse_copy_settings(mcse_layer@ from, mcse_layer@ to) {
 	to.agility_strict = from.agility_strict;
 	to.agility_points = from.agility_points;
 	to.pickup_beats = from.pickup_beats;
+	to.reverb_mix = from.reverb_mix;
+	to.reverb_damping = from.reverb_damping;
+	to.reverb_size = from.reverb_size;
 }
 
 /** Build a theme from XML text. Returns null and fills theme.error on

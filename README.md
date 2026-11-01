@@ -47,6 +47,15 @@ milliseconds.
 Copy `include/mcse.nvgt` and `include/mcse_theme_xml.nvgt` next to your script,
 or pass `-I` to the compiler. No plugin, no DLL, no build step.
 
+## Composing for it
+
+See [docs/authoring.md](docs/authoring.md). The short version: every take of a
+layer is the same bars at the same tempo, record past the loop and let the
+tail ring, and every file must be at least as long as the loop. Files do not
+have to be the same length as each other — MCSE loops at the bar count the
+theme declares, not at the end of a file, which is what lets each instrument
+ring out for as long as it needs.
+
 ## Themes
 
 MCSE reads the XML theme format that Elias Studio exports, so themes authored
@@ -86,9 +95,18 @@ Perc:    2 2 2 2 5 5 5 8 8 8 8 12 12 12 15 15 15 15 15
 ## Examples and tests
 
 ```bash
-nvgt -I include tests/choices.nvgt -- path/to/theme.epro   # no audio, no window
-nvgt -I include examples/play_theme.nvgt -- path/to/theme/folder
+nvgt -I include tests/validate.nvgt -- theme.epro     # files load, lengths work
+nvgt -I include tests/choices.nvgt  -- theme.epro     # what plays at each intensity
+nvgt -I include tests/drift.nvgt    -- theme/ 95      # loops stay together
+nvgt -I include tests/hear.nvgt     -- theme/ 1 12 6  # it makes a sound
+nvgt -I include tests/hear_switch.nvgt -- themeA/ themeB/
+nvgt -I include examples/play_theme.nvgt -- theme/
 ```
+
+`validate` and `choices` need no audio device. `drift` is the one worth
+running on your own music: it plays for longer than one loop and checks the
+layers are still together afterwards, which is the single failure that sounds
+perfect for the first ninety seconds and then falls apart.
 
 `play_theme` plays a theme and lets you steer it: up and down change intensity,
 left and right change key, space fires a stinger, escape stops.
