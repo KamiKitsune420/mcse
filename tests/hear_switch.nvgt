@@ -1,0 +1,64 @@
+/* hear_switch.nvgt - crossfade from one piece of music to another
+ *
+ * Plays piece A, then crossfades to piece B at the next bar line, then stops.
+ * Non-interactive and bounded, like hear.nvgt.
+ *
+ * Usage: hear_switch <folder A> <folder B> [seconds each] [intensity]
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+
+mcse_theme@ read(string folder) {
+	string[]@ found = find_files(folder + "/*.epro");
+	if (@found == null or found.length() == 0) return null;
+	mcse_theme@ theme = mcse_load_theme_file(folder + "/" + found[0]);
+	if (theme.error != "") {
+		println("theme error in " + folder + ": " + theme.error);
+		return null;
+	}
+	println("read " + found[0] + ": " + theme.layers.length() + " layers, " +
+		theme.tempo + " bpm, " + theme.beats_per_bar + "/" + theme.beat_unit);
+	return theme;
+}
+
+void main() {
+	const string[]@ args = ARGS;
+	if (args.length() < 3) {
+		println("usage: hear_switch <folder A> <folder B> [seconds each] [intensity]");
+		exit(2);
+	}
+	int seconds = args.length() > 3 ? parse_int(args[3]) : 6;
+	int intensity = args.length() > 4 ? parse_int(args[4]) : 8;
+
+	mcse_theme@ a = read(args[1]);
+	mcse_theme@ b = read(args[2]);
+	if (@a == null or @b == null) exit(1);
+
+	mcse_manager@ music = mcse_manager();
+	music.play(a, args[1] + "/", intensity, 500);
+	println("playing A at intensity " + intensity);
+	uint64 until = ticks() + seconds * 1000;
+	while (ticks() < until) { music.loop(); wait(5); }
+
+	println("asking for B -- it waits for a bar line, so this is not instant");
+	music.play(b, args[2] + "/", intensity, 2000);
+	uint64 deadline = ticks() + 12000;
+	while (ticks() < deadline and @music.outgoing == null) { music.loop(); wait(5); }
+	if (@music.outgoing == null) {
+		println("WARNING: the crossfade never began");
+		music.stop(0);
+		exit(1);
+	}
+	println("crossfading: A is on its way out, B is in");
+	until = ticks() + seconds * 1000;
+	while (ticks() < until) { music.loop(); wait(5); }
+	println("A finished and was released: " + (@music.outgoing == null ? "yes" : "no, still fading"));
+
+	music.stop(1000);
+	uint64 fade = ticks() + 1400;
+	while (ticks() < fade) { music.loop(); wait(5); }
+	println("done");
+	exit(0);
+}

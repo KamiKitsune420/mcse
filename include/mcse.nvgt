@@ -381,4 +381,112 @@ class mcse_player {
 		}
 	}
 	float get_volume() const property { return volume; }
+
+	/** Move this whole piece to a new master level over a time, keeping each
+	 * layer's own relative level. This is how one piece is crossfaded against
+	 * another; within a piece, use set_intensity. */
+	void fade_master(float db, int ms) {
+		uint64 at = now();
+		uint64 len = frames_for_ms(ms);
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (@l.playing == null) continue;
+			l.playing.set_timed_fade_in_frames(
+				mcse_gain(l.volume + volume), mcse_gain(l.volume + db), len, at);
+		}
+		volume = db;
+	}
+
+	/** Whether anything is still making a sound. */
+	bool get_sounding() property {
+		for (uint i = 0; i < theme.layers.length(); i++)
+			if (@theme.layers[i].playing != null and theme.layers[i].playing.playing)
+				return true;
+		return false;
+	}
+}
+
+/** Plays one piece at a time, and crossfades between pieces.
+ *
+ * Switching between two pieces is a different job from moving around inside
+ * one. Inside a piece every layer shares a grid, so a switch happens at the
+ * same play position and stays in time. Two different pieces share no grid at
+ * all -- different tempo, different length, different key -- so there is
+ * nothing to align and the honest thing is to fade one out while the other
+ * comes in. What can still be done is to wait for the outgoing piece to reach
+ * a bar line before starting, which is what `on_bar` is for and is the
+ * difference between a change of music and an interruption. */
+class mcse_manager {
+	mcse_player@ current = null;
+	mcse_player@ outgoing = null;
+	float volume = 0;
+	bool on_bar = true;          // wait for a bar line before crossfading
+
+	private mcse_player@ waiting = null;
+	private int waiting_fade = 0;
+
+	/** Crossfade to a piece. The first call simply starts it. */
+	void play(mcse_theme@ theme, string base, int intensity = 1,
+			  int fade_ms = 1000, mcse_load_sound@ loader = null) {
+		mcse_player@ next = mcse_player(theme, base, loader);
+		next.volume = volume;
+		if (@current == null) {
+			@current = @next;
+			current.start(intensity, fade_ms);
+			return;
+		}
+		next.intensity = intensity;
+		if (!on_bar) { begin(next, fade_ms); return; }
+		@waiting = @next;
+		waiting_fade = fade_ms;
+	}
+
+	private void begin(mcse_player@ next, int fade_ms) {
+		// the piece leaving keeps playing while it fades, so the two overlap
+		if (@outgoing != null) outgoing.stop(0);
+		@outgoing = @current;
+		@current = @next;
+		current.volume = -100;
+		current.start(current.intensity, fade_ms);
+		current.fade_master(volume, fade_ms);
+		if (@outgoing != null) {
+			outgoing.fade_master(-100, fade_ms);
+			outgoing.stop(fade_ms);
+		}
+	}
+
+	/** Call once per frame. */
+	void loop() {
+		if (@current != null) current.loop();
+		if (@outgoing != null) {
+			outgoing.loop();
+			if (!outgoing.sounding) @outgoing = null;
+		}
+		if (@waiting != null and @current != null) {
+			double beats = current.beat_position();
+			double per_bar = double(current.theme.beats_per_bar);
+			double into = beats - double(int(beats / per_bar) * per_bar);
+			if (into < 0.25) {
+				mcse_player@ next = @waiting;
+				@waiting = null;
+				begin(next, waiting_fade);
+			}
+		}
+	}
+
+	void set_intensity(int value) { if (@current != null) current.set_intensity(value); }
+	void set_key(int value) { if (@current != null) current.set_key(value); }
+	bool play_stinger(int layer_id = -1) {
+		return @current != null ? current.play_stinger(layer_id) : false;
+	}
+	void stop(int fade_ms = 500) {
+		@waiting = null;
+		if (@current != null) current.stop(fade_ms);
+		if (@outgoing != null) outgoing.stop(fade_ms);
+	}
+	void set_volume(float db) property {
+		volume = db;
+		if (@current != null) current.volume = db;
+	}
+	float get_volume() const property { return volume; }
 }
