@@ -1,0 +1,81 @@
+/* play_theme.nvgt - hear a theme, and steer its intensity
+ *
+ * Usage: play_theme <folder containing the .epro and its audio> [intensity]
+ *
+ * up/down arrows   raise and lower the intensity
+ * left/right       change musical key
+ * space            fire a stinger
+ * escape           stop
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+#include "speech.nvgt"
+
+mcse_player@ player = null;
+mcse_theme@ theme = null;
+
+string find_epro(string folder) {
+	string[]@ found = find_files(folder + "/*.epro");
+	if (@found == null or found.length() == 0) return "";
+	return folder + "/" + found[0];
+}
+
+void main() {
+	show_window("MCSE");
+	const string[]@ args = ARGS;
+	if (args.length() < 2) {
+		alert("MCSE", "Usage: play_theme <theme folder> [intensity]");
+		return;
+	}
+	string folder = args[1];
+	string epro = find_epro(folder);
+	if (epro == "") {
+		alert("MCSE", "No .epro theme file in " + folder);
+		return;
+	}
+	@theme = mcse_load_theme_file(epro);
+	if (theme.error != "") {
+		alert("MCSE", "Could not read the theme: " + theme.error);
+		return;
+	}
+
+	int intensity = args.length() > 2 ? parse_int(args[2]) : 1;
+	@player = mcse_player(theme, folder + "/");
+	screen_reader_speak(theme.layers.length() + " layers, intensity 1 to " +
+		theme.max_intensity() + ", " + theme.tempo + " beats per minute", true);
+	if (!player.start(intensity, 500)) {
+		alert("MCSE", "The theme would not start");
+		return;
+	}
+	say_state();
+
+	while (!key_pressed(KEY_ESCAPE)) {
+		wait(5);
+		player.loop();
+		if (key_pressed(KEY_UP) and player.intensity < theme.max_intensity()) {
+			player.set_intensity(player.intensity + 1);
+			say_state();
+		}
+		if (key_pressed(KEY_DOWN) and player.intensity > 1) {
+			player.set_intensity(player.intensity - 1);
+			say_state();
+		}
+		if (key_pressed(KEY_RIGHT)) { player.set_key(player.key + 1); say_state(); }
+		if (key_pressed(KEY_LEFT) and player.key > 0) { player.set_key(player.key - 1); say_state(); }
+		if (key_pressed(KEY_SPACE)) player.play_stinger();
+	}
+	player.stop(500);
+	wait(600);
+}
+
+void say_state() {
+	string text = "intensity " + player.intensity + ", key " + player.key + ": ";
+	for (uint i = 0; i < theme.layers.length(); i++) {
+		mcse_layer@ l = theme.layers[i];
+		if (l.kind != mcse_loop or @l.current == null) continue;
+		text += l.name + " " + l.current.intensity + ", ";
+	}
+	screen_reader_speak(text, true);
+}

@@ -1,0 +1,364 @@
+/* mcse.nvgt - MCSE, the Music Crossfade Switching Engine
+ *
+ * Layered adaptive music for NVGT. A piece of music is a set of layers --
+ * bass, strings, brass, percussion -- each of which has several alternative
+ * recordings of the same loop. Your game pushes a single number at it, the
+ * intensity, and each layer crossfades to the recording that belongs at that
+ * intensity. Nothing in the music has to be composed as a transition: the
+ * recordings are all the same length and bar-aligned, so a crossfade between
+ * two of them at the same play position is always in time.
+ *
+ * This is an independent implementation. It reads a theme format that an
+ * existing commercial tool also writes, and it shares no code with any such
+ * tool -- see docs/provenance.md.
+ *
+ * Distributed under the zlib licence, as NVGT's own includes are:
+ * This software is provided "as-is", without any express or implied warranty.
+ * In no event will the authors be held liable for any damages arising from the
+ * use of this software. Permission is granted to anyone to use this software
+ * for any purpose, including commercial applications, and to alter it and
+ * redistribute it freely, subject to the following restrictions:
+ * 1. The origin of this software must not be misrepresented; you must not
+ *    claim that you wrote the original software. If you use this software in a
+ *    product, an acknowledgment in the product documentation would be
+ *    appreciated but is not required.
+ * 2. Altered source versions must be plainly marked as such, and must not be
+ *    misrepresented as being the original software.
+ * 3. This notice may not be removed or altered from any source distribution.
+*/
+
+// A game that keeps its audio in a pack supplies its own loader, exactly as
+// NVGT's own music.nvgt does, so MCSE never needs to know where sound comes
+// from.
+funcdef sound@ mcse_load_sound(sound@, string);
+
+/** How a layer behaves. A loop plays continuously and crossfades between its
+ * recordings; a stinger is fired once, over the top. */
+enum mcse_layer_kind {
+	mcse_loop = 0,
+	mcse_stinger = 1,
+}
+
+/** One recording of one layer: which intensity it belongs at, which musical
+ * key it is in, and where the audio is. */
+class mcse_variation {
+	int intensity;     // the "trigger" in an Elias-authored theme
+	int key;
+	string filename;
+	int64 length;      // as the theme declares it; informational
+	mcse_variation(int intensity, int key, string filename, int64 length) {
+		this.intensity = intensity;
+		this.key = key;
+		this.filename = filename;
+		this.length = length;
+	}
+}
+
+/** One layer of the music, and whichever of its recordings is playing. */
+class mcse_layer {
+	int id;
+	string name;
+	mcse_layer_kind kind = mcse_loop;
+	float volume = 0;                  // dB, 0 = as recorded
+	int crossfade_min = 50, crossfade_max = 250;
+	int fade_in_min = 50, fade_in_max = 1000;
+	int fade_out_min = 500, fade_out_max = 10000;
+	int agility = 4;                   // in beats; 0 means switch immediately
+	bool agility_strict = false;
+	int[] agility_points;              // beat numbers, if given instead
+	int pickup_beats = 0;
+	mcse_variation@[] variations;
+
+	// runtime
+	sound@ playing = null;
+	sound@ leaving = null;
+	mcse_variation@ current = null;
+
+	/** The recording this layer should be playing at a given key and
+	 * intensity.
+	 *
+	 * **This rule is ours and is deliberately simple**: the highest intensity
+	 * at or below the one asked for, falling back to the lowest the layer has.
+	 * A theme authored for another engine may have been designed against a
+	 * different rule -- MCSE does not try to guess one, it documents this one
+	 * so a composer can author against it. */
+	mcse_variation@ choose(int key, int intensity) {
+		mcse_variation@ best = null;
+		mcse_variation@ lowest = null;
+		for (uint i = 0; i < variations.length(); i++) {
+			mcse_variation@ v = variations[i];
+			if (v.key != key) continue;
+			if (@lowest == null or v.intensity < lowest.intensity) @lowest = v;
+			if (v.intensity <= intensity and
+				(@best == null or v.intensity > best.intensity)) @best = v;
+		}
+		return @best != null ? best : lowest;
+	}
+
+	/** Every key this layer has recordings for. */
+	int[] keys() {
+		int[] found;
+		for (uint i = 0; i < variations.length(); i++) {
+			bool seen = false;
+			for (uint j = 0; j < found.length(); j++)
+				if (found[j] == variations[i].key) seen = true;
+			if (!seen) found.insert_last(variations[i].key);
+		}
+		return found;
+	}
+}
+
+/** A whole piece of music: its tempo and metre, and its layers. */
+class mcse_theme {
+	int tempo = 120;
+	int beats_per_bar = 4;
+	int beat_unit = 4;
+	int bars = 32;
+	int sample_rate = 44100;
+	int channels = 2;
+	float volume = 0;
+	string mode;
+	mcse_layer@[] layers;
+	string error;
+
+	double ms_per_beat() const {
+		// a beat is the unit the metre names, so 6/8 counts eighth notes
+		return 60000.0 / double(tempo) * (4.0 / double(beat_unit));
+	}
+	double ms_per_bar() const { return ms_per_beat() * double(beats_per_bar); }
+	uint64 frames_per_beat() const {
+		return uint64(ms_per_beat() * double(sample_rate) / 1000.0);
+	}
+
+	/** The highest intensity any layer has a recording for -- what a game
+	 * should treat as "as loud as this piece gets". */
+	int max_intensity() const {
+		int top = 0;
+		for (uint i = 0; i < layers.length(); i++)
+			for (uint j = 0; j < layers[i].variations.length(); j++)
+				if (layers[i].variations[j].intensity > top)
+					top = layers[i].variations[j].intensity;
+		return top;
+	}
+}
+
+/** Plays a theme, and moves it between intensities.
+ *
+ * Call loop() once per frame from your game loop, the way NVGT's own music
+ * system wants its loop() called. */
+class mcse_player {
+	mcse_theme@ theme = null;
+	mcse_load_sound@ loader = null;
+	string base;                 // prefixed to every recording's filename
+	mixer@ output = null;
+	int intensity = 1;
+	int key = 0;
+	bool beat_aligned = true;    // wait for the next agility point to switch
+	float volume = 0;
+
+	private bool started = false;
+	private int pending_intensity = -1;
+	private int pending_key = -1;
+	private sound@[] stingers;
+
+	mcse_player(mcse_theme@ theme, string base = "", mcse_load_sound@ loader = null) {
+		@this.theme = @theme;
+		this.base = base;
+		@this.loader = @loader;
+	}
+
+	private sound@ open(string filename) {
+		sound@ s = sound();
+		if (@output != null) s.set_mixer(output);
+		if (@loader != null) return loader(s, base + filename);
+		if (!s.stream(base + filename)) return null;
+		return s;
+	}
+
+	private uint64 now() const { return sound_default_engine.time_in_frames; }
+
+	/** Start the piece. Every layer is opened, aligned and faded up together.
+	 *
+	 * The alignment is done by seeking all the layers inside one audio buffer
+	 * period rather than by scheduling a start time, because NVGT does not
+	 * expose start-time scheduling to script -- `set_stop_time_*` is
+	 * registered and `set_start_time_*` is not, although both exist in the
+	 * engine. Seeking every layer in one tight pass lands them in the same
+	 * buffer, which is sample-aligned in practice; with start-time scheduling
+	 * it would be sample-aligned by construction. */
+	bool start(int intensity = 1, int fade_ms = 0) {
+		if (@theme == null) return false;
+		this.intensity = intensity;
+		started = false;
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (l.kind != mcse_loop) continue;
+			@l.current = l.choose(key, intensity);
+			if (@l.current == null) continue;
+			@l.playing = open(l.current.filename);
+			if (@l.playing == null) continue;
+			l.playing.looping = true;
+			l.playing.volume = -100;
+		}
+		// one tight pass: start them, then put them all at frame 0 together
+		for (uint i = 0; i < theme.layers.length(); i++)
+			if (@theme.layers[i].playing != null) theme.layers[i].playing.play_looped();
+		for (uint i = 0; i < theme.layers.length(); i++)
+			if (@theme.layers[i].playing != null) theme.layers[i].playing.seek_in_frames(0);
+
+		uint64 at = now();
+		uint64 len = frames_for_ms(fade_ms);
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (@l.playing == null) continue;
+			if (len == 0) l.playing.volume = l.volume + volume;
+			else l.playing.set_timed_fade_in_frames(-100, l.volume + volume, len, at);
+		}
+		started = true;
+		return true;
+	}
+
+	uint64 frames_for_ms(int ms) const {
+		if (@theme == null) return 0;
+		return uint64(double(ms) * double(theme.sample_rate) / 1000.0);
+	}
+
+	/** Ask for a different intensity. Takes effect at the next agility point
+	 * unless beat_aligned is false. */
+	void set_intensity(int value) {
+		if (value == intensity and pending_intensity < 0) return;
+		pending_intensity = value;
+		if (!beat_aligned) apply_pending();
+	}
+
+	void set_key(int value) {
+		pending_key = value;
+		if (!beat_aligned) apply_pending();
+	}
+
+	/** How far through the current bar we are, in beats. */
+	double beat_position() {
+		mcse_layer@ anchor = reference_layer();
+		if (@anchor == null or @anchor.playing == null) return 0;
+		double ms = double(anchor.playing.position_in_frames) * 1000.0
+			/ double(theme.sample_rate);
+		return ms / theme.ms_per_beat();
+	}
+
+	private mcse_layer@ reference_layer() {
+		for (uint i = 0; i < theme.layers.length(); i++)
+			if (@theme.layers[i].playing != null) return theme.layers[i];
+		return null;
+	}
+
+	/** Whether we are close enough to an agility point to switch now. */
+	private bool at_switch_point(mcse_layer@ l) {
+		if (!beat_aligned or l.agility <= 0) return true;
+		double beats = beat_position();
+		if (l.agility_points.length() > 0) {
+			for (uint i = 0; i < l.agility_points.length(); i++) {
+				double d = beats - double(l.agility_points[i]);
+				if (d >= 0 and d < 0.25) return true;
+			}
+			return false;
+		}
+		double into = beats - double(int(beats / double(l.agility)) * l.agility);
+		return into < 0.25;
+	}
+
+	private void apply_pending() {
+		if (pending_key >= 0) { key = pending_key; pending_key = -1; }
+		if (pending_intensity >= 0) { intensity = pending_intensity; pending_intensity = -1; }
+		for (uint i = 0; i < theme.layers.length(); i++)
+			switch_layer(theme.layers[i]);
+	}
+
+	/** Crossfade one layer to whatever it should be playing now.
+	 *
+	 * The new recording is opened, put at the same play position as the one
+	 * leaving, and both fades are scheduled at the same absolute frame -- so
+	 * the two sides of the crossfade are welded together whatever the frame
+	 * rate of the game loop. */
+	private void switch_layer(mcse_layer@ l) {
+		if (l.kind != mcse_loop or @l.playing == null) return;
+		mcse_variation@ want = l.choose(key, intensity);
+		if (@want == null or (@l.current != null and want is l.current)) return;
+
+		uint64 at = now() + frames_for_ms(20);     // a hair ahead of the clock
+		uint64 len = frames_for_ms(l.crossfade_max);
+		uint64 pos = l.playing.position_in_frames;
+
+		sound@ next = open(want.filename);
+		if (@next == null) return;
+		next.looping = true;
+		next.volume = -100;
+		next.play_looped();
+		// where the leaving layer will be when the crossfade begins
+		next.seek_in_frames(pos + (at > now() ? at - now() : 0));
+		next.set_timed_fade_in_frames(-100, l.volume + volume, len, at);
+
+		l.playing.set_timed_fade_in_frames(l.volume + volume, -100, len, at);
+		l.playing.set_stop_time_with_fade_in_frames(at + len, 0);
+		@l.leaving = @l.playing;
+		@l.playing = @next;
+		@l.current = @want;
+	}
+
+	/** Fire a stinger -- a one-shot flourish over the top of the loops. */
+	bool play_stinger(int layer_id = -1) {
+		if (@theme == null) return false;
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (l.kind != mcse_stinger) continue;
+			if (layer_id >= 0 and l.id != layer_id) continue;
+			mcse_variation@ v = l.choose(key, intensity);
+			if (@v == null) continue;
+			sound@ s = open(v.filename);
+			if (@s == null) continue;
+			s.volume = l.volume + volume;
+			s.play();
+			stingers.insert_last(@s);
+			if (layer_id >= 0) return true;
+		}
+		return true;
+	}
+
+	/** Call once per frame. */
+	void loop() {
+		if (!started or @theme == null) return;
+		if (pending_intensity >= 0 or pending_key >= 0) {
+			mcse_layer@ anchor = reference_layer();
+			if (@anchor == null or at_switch_point(anchor)) apply_pending();
+		}
+		// let go of anything that has finished
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (@l.leaving != null and !l.leaving.playing) @l.leaving = null;
+		}
+		for (uint i = 0; i < stingers.length();) {
+			if (!stingers[i].playing) stingers.remove_at(i);
+			else i++;
+		}
+	}
+
+	void stop(int fade_ms = 500) {
+		uint64 at = now();
+		uint64 len = frames_for_ms(fade_ms);
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (@l.playing == null) continue;
+			l.playing.set_timed_fade_in_frames(l.playing.volume, -100, len, at);
+			l.playing.set_stop_time_with_fade_in_frames(at + len, 0);
+		}
+		started = false;
+	}
+
+	void set_volume(float db) property {
+		volume = db;
+		for (uint i = 0; i < theme.layers.length(); i++) {
+			mcse_layer@ l = theme.layers[i];
+			if (@l.playing != null) l.playing.volume = l.volume + volume;
+		}
+	}
+	float get_volume() const property { return volume; }
+}

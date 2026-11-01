@@ -1,0 +1,6 @@
+# compiler output
+*.exe
+*.zip
+# scratch renders
+*.wav
+*.pcm

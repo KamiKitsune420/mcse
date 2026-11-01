@@ -1,0 +1,282 @@
+/* mcse_theme_xml.nvgt - read a theme out of XML
+ *
+ * MCSE's own engine (mcse.nvgt) does not care where a theme comes from. This
+ * reads the XML theme format that Elias Studio exports, so themes authored
+ * with that tool work, and so a theme can be written by hand in a text editor
+ * with no tool at all.
+ *
+ * Reading a file format is not copying an implementation -- see
+ * docs/provenance.md and docs/theme_format.md, which documents the format as
+ * it was observed, including which attributes are required and which pairs of
+ * elements may not both appear.
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse.nvgt"
+
+/** A parsed element. Deliberately tiny: the theme format has attributes and
+ * nesting and no text content, so that is all this models. */
+class mcse_xml {
+	string name;
+	string[] attr_names;
+	string[] attr_values;
+	mcse_xml@[] children;
+
+	bool has(string key) const {
+		for (uint i = 0; i < attr_names.length(); i++)
+			if (attr_names[i] == key) return true;
+		return false;
+	}
+	string attr(string key, string fallback = "") const {
+		for (uint i = 0; i < attr_names.length(); i++)
+			if (attr_names[i] == key) return attr_values[i];
+		return fallback;
+	}
+	int attr_int(string key, int fallback) const {
+		if (!has(key)) return fallback;
+		return parse_int(attr(key));
+	}
+	float attr_float(string key, float fallback) const {
+		if (!has(key)) return fallback;
+		return parse_float(attr(key));
+	}
+	bool attr_bool(string key, bool fallback) const {
+		if (!has(key)) return fallback;
+		string v = attr(key).lower();
+		return v == "yes" or v == "true" or v == "1";
+	}
+	mcse_xml@ first(string child) {
+		for (uint i = 0; i < children.length(); i++)
+			if (children[i].name == child) return children[i];
+		return null;
+	}
+	mcse_xml@[] all(string child) {
+		mcse_xml@[] found;
+		for (uint i = 0; i < children.length(); i++)
+			if (children[i].name == child) found.insert_last(children[i]);
+		return found;
+	}
+}
+
+string mcse_xml_unescape(string value) {
+	if (value.find("&") < 0) return value;
+	value = value.replace("&lt;", "<", true);
+	value = value.replace("&gt;", ">", true);
+	value = value.replace("&quot;", "\"", true);
+	value = value.replace("&apos;", "'", true);
+	// ampersand last, or an escaped entity would be decoded twice
+	value = value.replace("&amp;", "&", true);
+	return value;
+}
+
+bool mcse_is_space(string c) {
+	return c == " " or c == "\t" or c == "\r" or c == "\n";
+}
+
+/** Parse the theme subset of XML: elements, attributes in double quotes,
+ * self-closing tags, comments and declarations. No text content, no CDATA,
+ * no namespaces -- a theme has none of those, and a parser that pretends to
+ * handle what it has never seen is worse than one that says what it covers. */
+mcse_xml@ mcse_parse_xml(string text, string &out error) {
+	error = "";
+	mcse_xml@[] stack;
+	mcse_xml@ root = null;
+	int i = 0;
+	int size = text.length();
+	while (i < size) {
+		int open = text.find("<", i);
+		if (open < 0) break;
+		i = open + 1;
+		string lead = text.slice(i, i + 1);
+		if (lead == "?" or lead == "!") {              // declaration or comment
+			int close = text.find(">", i);
+			if (close < 0) { error = "unterminated declaration or comment"; return null; }
+			i = close + 1;
+			continue;
+		}
+		if (lead == "/") {                              // closing tag
+			int close = text.find(">", i);
+			if (close < 0) { error = "unterminated closing tag"; return null; }
+			string name = text.slice(i + 1, close).trim_whitespace();
+			if (stack.length() == 0) { error = "closing tag </" + name + "> with nothing open"; return null; }
+			if (stack[stack.length() - 1].name != name) {
+				error = "closing tag </" + name + "> does not match <" +
+					stack[stack.length() - 1].name + ">";
+				return null;
+			}
+			stack.remove_at(stack.length() - 1);
+			i = close + 1;
+			continue;
+		}
+		// an opening tag: read its name, then its attributes
+		mcse_xml@ node = mcse_xml();
+		int j = i;
+		while (j < size) {
+			string c = text.slice(j, j + 1);
+			if (mcse_is_space(c) or c == ">" or c == "/") break;
+			j++;
+		}
+		node.name = text.slice(i, j);
+		if (node.name == "") { error = "a tag with no name"; return null; }
+		bool self_closing = false;
+		while (j < size) {
+			while (j < size and mcse_is_space(text.slice(j, j + 1))) j++;
+			string c = text.slice(j, j + 1);
+			if (c == "/") { self_closing = true; j++; continue; }
+			if (c == ">") { j++; break; }
+			int eq = text.find("=", j);
+			if (eq < 0) { error = "attribute with no value in <" + node.name + ">"; return null; }
+			string key = text.slice(j, eq).trim_whitespace();
+			int q1 = text.find("\"", eq);
+			if (q1 < 0) { error = "unquoted value for " + key; return null; }
+			int q2 = text.find("\"", q1 + 1);
+			if (q2 < 0) { error = "unterminated value for " + key; return null; }
+			node.attr_names.insert_last(key);
+			node.attr_values.insert_last(mcse_xml_unescape(text.slice(q1 + 1, q2)));
+			j = q2 + 1;
+		}
+		if (stack.length() > 0) stack[stack.length() - 1].children.insert_last(@node);
+		else if (@root == null) @root = @node;
+		if (!self_closing) stack.insert_last(@node);
+		i = j;
+	}
+	if (stack.length() > 0) { error = "<" + stack[0].name + "> was never closed"; return null; }
+	if (@root == null) error = "no element found";
+	return root;
+}
+
+/** Copy the fade, crossfade, reverb and agility settings an element carries
+ * onto a layer. Used for the theme's <defaults> and then again per layer, so
+ * a layer overrides only what it mentions. */
+void mcse_apply_settings(mcse_xml@ node, mcse_layer@ layer) {
+	mcse_xml@ e = node.first("crossfade");
+	if (@e != null) {
+		layer.crossfade_min = e.attr_int("minimum", layer.crossfade_min);
+		layer.crossfade_max = e.attr_int("maximum", layer.crossfade_max);
+	}
+	@e = node.first("fade_in");
+	if (@e != null) {
+		layer.fade_in_min = e.attr_int("minimum", layer.fade_in_min);
+		layer.fade_in_max = e.attr_int("maximum", layer.fade_in_max);
+	}
+	@e = node.first("fade_out");
+	if (@e != null) {
+		layer.fade_out_min = e.attr_int("minimum", layer.fade_out_min);
+		layer.fade_out_max = e.attr_int("maximum", layer.fade_out_max);
+	}
+	@e = node.first("agility");
+	if (@e != null) {
+		layer.agility = e.attr_int("value", layer.agility);
+		layer.agility_strict = e.attr_bool("strict", layer.agility_strict);
+	}
+	@e = node.first("agility_points");
+	if (@e != null) {
+		layer.agility_points.resize(0);
+		mcse_xml@[] beats = e.all("beat");
+		for (uint i = 0; i < beats.length(); i++)
+			layer.agility_points.insert_last(beats[i].attr_int("point", 0));
+	}
+	@e = node.first("pickup");
+	if (@e != null) layer.pickup_beats = e.attr_int("beats", layer.pickup_beats);
+}
+
+void mcse_copy_settings(mcse_layer@ from, mcse_layer@ to) {
+	to.crossfade_min = from.crossfade_min;
+	to.crossfade_max = from.crossfade_max;
+	to.fade_in_min = from.fade_in_min;
+	to.fade_in_max = from.fade_in_max;
+	to.fade_out_min = from.fade_out_min;
+	to.fade_out_max = from.fade_out_max;
+	to.agility = from.agility;
+	to.agility_strict = from.agility_strict;
+	to.agility_points = from.agility_points;
+	to.pickup_beats = from.pickup_beats;
+}
+
+/** Build a theme from XML text. Returns null and fills theme.error on
+ * failure; the required attributes are the ones the format documents as
+ * required, so a theme missing one is rejected here rather than half-played. */
+mcse_theme@ mcse_load_theme_xml(string text) {
+	mcse_theme@ theme = mcse_theme();
+	string error;
+	mcse_xml@ root = mcse_parse_xml(text, error);
+	if (@root == null) { theme.error = error; return theme; }
+	if (root.name != "theme") { theme.error = "no theme element was found"; return theme; }
+
+	string[] required = {"tempo", "time_signature", "bars", "sample_rate", "channels", "mode"};
+	for (uint i = 0; i < required.length(); i++)
+		if (!root.has(required[i])) {
+			theme.error = "no " + required[i] + " attribute was specified for the theme";
+			return theme;
+		}
+	theme.tempo = root.attr_int("tempo", 120);
+	theme.bars = root.attr_int("bars", 32);
+	theme.sample_rate = root.attr_int("sample_rate", 44100);
+	theme.channels = root.attr_int("channels", 2);
+	theme.volume = root.attr_float("volume", 0);
+	theme.mode = root.attr("mode");
+	string sig = root.attr("time_signature");
+	int slash = sig.find("/");
+	if (slash < 0) { theme.error = "an invalid time signature attribute was specified for the theme"; return theme; }
+	theme.beats_per_bar = parse_int(sig.slice(0, slash));
+	theme.beat_unit = parse_int(sig.slice(slash + 1, 0));
+	if (theme.tempo <= 0 or theme.beats_per_bar <= 0 or theme.beat_unit <= 0) {
+		theme.error = "an invalid tempo or time signature attribute was specified for the theme";
+		return theme;
+	}
+
+	mcse_layer@ defaults = mcse_layer();
+	mcse_xml@ d = root.first("defaults");
+	if (@d != null) mcse_apply_settings(d, defaults);
+
+	for (uint t = 0; t < root.children.length(); t++) {
+		mcse_xml@ node = root.children[t];
+		bool is_loop = node.name == "audio_loop_track";
+		bool is_stinger = node.name == "audio_stinger_track";
+		if (!is_loop and !is_stinger) continue;
+		mcse_layer@ layer = mcse_layer();
+		mcse_copy_settings(defaults, layer);
+		layer.kind = is_loop ? mcse_loop : mcse_stinger;
+		if (!node.has("id")) {
+			theme.error = "one or more tracks in the theme are missing their id attribute";
+			return theme;
+		}
+		layer.id = node.attr_int("id", 0);
+		layer.name = node.attr("name");
+		layer.volume = node.attr_float("volume", 0);
+		mcse_apply_settings(node, layer);
+		if (@node.first("agility") != null and @node.first("agility_points") != null) {
+			theme.error = "both an agility element and an agility_points element was specified for track " + layer.id;
+			return theme;
+		}
+		mcse_xml@[] keys = node.all("key");
+		for (uint k = 0; k < keys.length(); k++) {
+			int key_value = keys[k].attr_int("value", 0);
+			for (uint v = 0; v < keys[k].children.length(); v++) {
+				mcse_xml@ rec = keys[k].children[v];
+				if (rec.name != "trigger" and rec.name != "stinger") continue;
+				layer.variations.insert_last(mcse_variation(
+					rec.attr_int("value", 1), key_value, rec.attr("filename"),
+					int64(rec.attr_int("length", 0))));
+			}
+		}
+		theme.layers.insert_last(@layer);
+	}
+	if (theme.layers.length() == 0) theme.error = "there are no tracks in the theme";
+	return theme;
+}
+
+/** Convenience: read a theme from a file on disk. A game whose themes live in
+ * a pack should read the bytes itself and call mcse_load_theme_xml. */
+mcse_theme@ mcse_load_theme_file(string path) {
+	file f;
+	if (!f.open(path, "rb")) {
+		mcse_theme@ theme = mcse_theme();
+		theme.error = "could not open " + path;
+		return theme;
+	}
+	string text = f.read(0);
+	f.close();
+	return mcse_load_theme_xml(text);
+}

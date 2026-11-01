@@ -1,0 +1,74 @@
+/* choices.nvgt - what MCSE would play, without playing anything
+ *
+ * Parses a theme and prints, for every intensity, which recording each layer
+ * would choose. No sound device, no window, no audio -- so this runs anywhere
+ * and in a build pipeline.
+ *
+ * Usage: choices <theme.epro>
+ *
+ * It is also the check that matters: the choice rule has to be monotone. If
+ * raising the intensity ever makes a layer drop to a quieter recording, the
+ * music would lurch backwards as the game got more tense, and no amount of
+ * listening to one level would reveal it.
+ *
+ * Distributed under the zlib licence; see mcse.nvgt for the full notice.
+*/
+
+#include "mcse_theme_xml.nvgt"
+
+void main() {
+	const string[]@ args = ARGS;
+	if (args.length() < 2) {
+		println("usage: choices <theme.epro>");
+		exit(2);
+	}
+	mcse_theme@ theme = mcse_load_theme_file(args[1]);
+	if (theme.error != "") {
+		println("FAILED to read the theme: " + theme.error);
+		exit(1);
+	}
+
+	int top = theme.max_intensity();
+	println("theme: " + theme.layers.length() + " layers, " + theme.tempo +
+		" bpm, " + theme.beats_per_bar + "/" + theme.beat_unit + ", " +
+		theme.bars + " bars, " + theme.sample_rate + " Hz, " +
+		theme.channels + " channels");
+	println("  a beat is " + theme.ms_per_beat() + " ms, a bar " +
+		theme.ms_per_bar() + " ms");
+	println("  intensity runs 1 to " + top);
+
+	int loops = 0, stingers = 0, variations = 0;
+	for (uint i = 0; i < theme.layers.length(); i++) {
+		mcse_layer@ l = theme.layers[i];
+		if (l.kind == mcse_loop) loops++; else stingers++;
+		variations += l.variations.length();
+		println("  layer " + l.id + " " + (l.kind == mcse_loop ? "loop   " : "stinger") +
+			" " + l.name + ": " + l.variations.length() + " recordings, keys " +
+			l.keys().length() + ", crossfade " + l.crossfade_min + "-" +
+			l.crossfade_max + " ms, agility " + l.agility);
+	}
+	println("totals: " + loops + " loops, " + stingers + " stingers, " +
+		variations + " recordings");
+
+	// the choice table, and the monotonicity check over it
+	int regressions = 0, gaps = 0;
+	for (uint i = 0; i < theme.layers.length(); i++) {
+		mcse_layer@ l = theme.layers[i];
+		if (l.kind != mcse_loop) continue;
+		string row = "  " + l.name + ": ";
+		int previous = -1;
+		for (int n = 1; n <= top; n++) {
+			mcse_variation@ v = l.choose(0, n);
+			if (@v == null) { gaps++; row += "- "; continue; }
+			if (previous >= 0 and v.intensity < previous) regressions++;
+			previous = v.intensity;
+			row += v.intensity + " ";
+		}
+		println(row);
+	}
+	println("");
+	println("monotone: " + (regressions == 0 ? "yes" : "NO, " + regressions + " regressions"));
+	println("layers with no recording at some intensity: " + gaps);
+	if (regressions > 0) exit(1);
+	exit(0);
+}
