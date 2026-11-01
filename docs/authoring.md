@@ -62,6 +62,13 @@ highest take at or below** the intensity your game asks for, so:
 <trigger value="11" .../>    plays at 11 and up
 ```
 
+### Dropping a layer out
+
+To make a layer silent at some intensity, give it a take with a `length` of
+`2` and a short stub file. MCSE reads that as "silent here", fades the layer
+out, and brings it back in step with the others at the next real take. It is
+how you score the middle of a range without a particular instrument.
+
 You do not need every layer to have takes at the same intensities. Give the
 percussion three steps and the strings twelve if that is what the music wants.
 A layer with nothing at or below the asked-for intensity plays its lowest take.

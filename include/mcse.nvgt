@@ -53,6 +53,11 @@ enum mcse_layer_kind {
 	mcse_stinger = 1,
 }
 
+/** A declared length below this is a marker rather than a measurement, so the
+ * take is a placeholder: see `mcse_variation::dummy`. Real takes declare
+ * lengths in the millions; the ones observed in the wild declare exactly 2. */
+const int64 MCSE_DUMMY_LENGTH = 1000;
+
 /** One recording of one layer: which intensity it belongs at, which musical
  * key it is in, and where the audio is. */
 class mcse_variation {
@@ -60,11 +65,27 @@ class mcse_variation {
 	int key;
 	string filename;
 	int64 length;      // as the theme declares it; informational
+
+	/** A placeholder, meaning **this layer is silent at this intensity**.
+	 *
+	 * Not an error and not a missing file: it is a deliberate hole in the
+	 * arrangement. One real theme's wind layer has takes at intensities 1, 2,
+	 * 7, 10 and 11 where 7 is a placeholder -- the winds drop out in the
+	 * middle of the range and come back above it.
+	 *
+	 * The format marks them by declaring a nonsense length: every real take
+	 * declares millions and a placeholder declares 2. The audio that ships
+	 * alongside is a two or three second stub, which is why a layer that
+	 * looped it would be obviously wrong, and why reading this marker matters
+	 * rather than trusting the file. */
+	bool dummy = false;
+
 	mcse_variation(int intensity, int key, string filename, int64 length) {
 		this.intensity = intensity;
 		this.key = key;
 		this.filename = filename;
 		this.length = length;
+		this.dummy = length > 0 and length < MCSE_DUMMY_LENGTH;
 	}
 }
 
@@ -337,7 +358,7 @@ class mcse_player {
 			mcse_layer@ l = theme.layers[i];
 			if (l.kind != mcse_loop) continue;
 			@l.current = l.choose(key, intensity);
-			if (@l.current == null) continue;
+			if (@l.current == null or l.current.dummy) continue;
 			@l.playing = open(l.current.filename);
 			if (@l.playing == null) continue;
 			l.playing.looping = true;
@@ -403,7 +424,8 @@ class mcse_player {
 
 	private mcse_layer@ reference_layer() {
 		for (uint i = 0; i < theme.layers.length(); i++)
-			if (@theme.layers[i].playing != null) return theme.layers[i];
+			if (@theme.layers[i].playing != null and theme.layers[i].playing.playing)
+				return theme.layers[i];
 		return null;
 	}
 
@@ -436,9 +458,45 @@ class mcse_player {
 	 * the two sides of the crossfade are welded together whatever the frame
 	 * rate of the game loop. */
 	private void switch_layer(mcse_layer@ l) {
-		if (l.kind != mcse_loop or @l.playing == null) return;
+		if (l.kind != mcse_loop) return;
 		mcse_variation@ want = l.choose(key, intensity);
 		if (@want == null or (@l.current != null and want is l.current)) return;
+
+		// a placeholder means this layer is silent here: fade it out and let
+		// it go, rather than looping a two-second stub
+		if (want.dummy) {
+			if (@l.playing != null) {
+				uint64 out_at = now();
+				uint64 out_len = frames_for_ms(l.fade_out_min);
+				l.playing.set_timed_fade_in_frames(
+					mcse_gain(l.volume + volume), 0, out_len, out_at);
+				l.playing.set_stop_time_with_fade_in_frames(out_at + out_len, 0);
+				@l.leaving = @l.playing;
+				@l.playing = null;
+			}
+			@l.current = @want;
+			return;
+		}
+
+		// ...and a layer that was silent has to be STARTED rather than
+		// crossfaded, in step with whatever is already playing
+		if (@l.playing == null) {
+			sound@ back = open(want.filename);
+			if (@back == null) return;
+			back.looping = true;
+			set_loop(back, want.filename);
+			route(l, back);
+			back.play_looped();
+			mcse_layer@ anchor = reference_layer();
+			if (@anchor != null and @anchor.playing != null)
+				back.seek_in_frames(anchor.playing.position_in_frames);
+			uint64 in_at = now();
+			back.set_timed_fade_in_frames(
+				0, mcse_gain(l.volume + volume), frames_for_ms(l.fade_in_max), in_at);
+			@l.playing = @back;
+			@l.current = @want;
+			return;
+		}
 
 		uint64 at = now() + frames_for_ms(20);     // a hair ahead of the clock
 		uint64 len = frames_for_ms(l.crossfade_for(

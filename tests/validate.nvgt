@@ -63,7 +63,7 @@ void main() {
 		println("  (the theme is " + theme.sample_rate + " Hz, so the engine is " +
 			"resampling; lengths below are in engine frames)");
 
-	int missing = 0, loops_checked = 0, stingers_checked = 0;
+	int missing = 0, loops_checked = 0, stingers_checked = 0, dummies = 0;
 	uint64 shortest = 0, longest = 0;
 	string[] too_short;
 
@@ -83,6 +83,9 @@ void main() {
 			uint64 frames = s.length_in_frames;
 			s.close();
 			if (l.kind != mcse_loop) { stingers_checked++; continue; }
+			// a placeholder is meant to be short: it says the layer is silent
+			// at that intensity, and the stub beside it is never looped
+			if (rec.dummy) { dummies++; continue; }
 			loops_checked++;
 			if (shortest == 0 or frames < shortest) shortest = frames;
 			if (frames > longest) longest = frames;
@@ -94,6 +97,8 @@ void main() {
 
 	println("  checked " + loops_checked + " loop recordings and " +
 		stingers_checked + " stingers");
+	if (dummies > 0)
+		println("  " + dummies + " placeholder take(s), where a layer is silent by design");
 	if (loops_checked > 0) {
 		println("  loop recordings run " + shortest + " to " + longest + " frames (" +
 			(double(shortest) / double(engine_rate)) + " to " +

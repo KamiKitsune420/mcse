@@ -50,7 +50,7 @@ required, it is listed as required here.
 | `audio_loop_track` | `id` **required**; `name`, `volume` | a layer that plays continuously |
 | `audio_stinger_track` | `id` **required**; `name`, `volume` | a layer fired once, over the top |
 | `key` | `value`, `name` | a musical key; `value` is what `set_key` takes |
-| `trigger` / `stinger` | `value`, `length`, `filename` | one recording. `value` is the intensity |
+| `trigger` / `stinger` | `value`, `length`, `filename` | one take. `value` is the intensity. A `length` under 1000 is a **placeholder** -- see below |
 | `crossfade` | `minimum`, `maximum` | milliseconds |
 | `fade_in`, `fade_out` | `minimum`, `maximum` | milliseconds |
 | `reverb` | `mix`, `damping`, `size` | 0 to 100 each; applied through `audio_freeverb_node` |
@@ -110,6 +110,30 @@ which `tests/validate.nvgt` enforces.
 
 `length` is declared per recording and MCSE reads it but does not rely on it:
 it does not match the shipped audio, so the audio itself is the authority.
+
+### Placeholder takes: a layer that is silent on purpose
+
+A take whose declared `length` is a nonsense value -- **2**, in every one
+observed -- is a placeholder, and it means **this layer is silent at this
+intensity**. It is not an error and not a missing file. The audio shipped
+beside it is a two or three second stub that is never meant to be looped, and
+the filename sometimes says so outright (`Winds 5 dummy.wav`).
+
+It is a deliberate hole in the arrangement. One theme's wind layer reads:
+
+```
+Winds: 1 2 2 2 2 2 _ _ _ 10 11 11 11 14 14 16 16 16
+```
+
+-- winds at intensities 1 to 6, gone at 7, 8 and 9, back at 10. The
+middle of the range is scored without them.
+
+Two of five real themes use this, so it is not a corner case, and the
+original library has an export for creating one
+(`elias_track_add_dummy_trigger`). MCSE fades such a layer out and lets it go,
+and starts it again in step with the others when a real take is next asked
+for. `tests/validate.nvgt` counts placeholders rather than reporting them as
+files too short to loop, and `tests/choices.nvgt` prints them as `_`.
 
 ### Two frame units, which is an 8.8% error waiting to happen
 

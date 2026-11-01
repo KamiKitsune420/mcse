@@ -60,6 +60,7 @@ void main() {
 		for (int n = 1; n <= top; n++) {
 			mcse_variation@ v = l.choose(0, n);
 			if (@v == null) { gaps++; row += "- "; continue; }
+			if (v.dummy) { row += "_ "; continue; }   // silent here, by design
 			if (previous >= 0 and v.intensity < previous) regressions++;
 			previous = v.intensity;
 			row += v.intensity + " ";
@@ -67,6 +68,8 @@ void main() {
 		println(row);
 	}
 	println("");
+	println("(a number is the take chosen; _ means the layer is silent there,");
+	println(" which a theme asks for with a placeholder take)");
 	println("monotone: " + (regressions == 0 ? "yes" : "NO, " + regressions + " regressions"));
 	println("layers with no recording at some intensity: " + gaps);
 	if (regressions > 0) exit(1);
